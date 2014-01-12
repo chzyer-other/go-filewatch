@@ -1,135 +1,12 @@
-package main
+package filewatch
 
 import (
-	"os/signal"
-	"sync"
-	"path/filepath"
-	"io/ioutil"
-	"bufio"
-	"time"
-	"encoding/binary"
 	"os"
-	"log"
-	"syscall"
+	"time"
+	"io/ioutil"
+	"path/filepath"
+	"encoding/binary"
 )
-
-type Stat struct {
-	syscall.Stat_t
-	Ctime time.Time
-}
-
-type File struct {
-	*os.File
-	stat *Stat
-	buf *bufio.Reader
-	offset int64
-	Path string
-}
-
-func NewFile(p string, defOffset int64) (f *File, err error) {
-	of, err := os.Open(p)
-	if err != nil { return }
-	stat, err := fstat(of.Fd())
-	if err != nil { return }
-	offset := defOffset
-	if offset < 0 {
-		offset = stat.Size
-	}
-	f = &File {
-		File: of,
-		stat: stat,
-		offset: stat.Size,
-		Path: p,
-	}
-	f.buf = bufio.NewReader(f)
-	return
-}
-
-func (f *File) ReadLine() (path string, b []byte, err error) {
-	b, _, err = f.buf.ReadLine()
-	if err != nil { return }
-	path = f.Path
-	return
-}
-
-func (f *File) Ino() (s uint64) {
-	return f.stat.Ino
-}
-
-func (f *File) CacheStat() (s *Stat) {
-	return f.stat
-}
-
-func (f *File) AddOffset(offset int) {
-	f.offset += int64(offset)
-}
-
-func (f *File) Read(buf []byte) (n int, err error) {
-	n, err = f.ReadAt(buf, f.offset)
-	return
-}
-
-func (f *File) Seek(offset int64) {
-	// log.Println("seek", f.Path, "to", offset)
-	f.offset = offset
-}
-
-func (f *File) Offset() int64 {
-	return f.offset
-}
-
-func (f *File) UpdateStat(s *Stat) {
-	f.stat = s
-}
-
-func (f *File) CreateBefore(t time.Time) bool {
-	return f.stat.Ctime.Before(t)
-}
-
-// ----------------------------------------------------------------------------
-
-type LogInfo struct {
-	Msg string
-	Path string
-}
-
-type Pipe struct {
-	rl, wl, l sync.Mutex
-	wWait sync.Cond
-	rWait sync.Cond
-}
-
-type FileReader struct {
-	*Pipe
-	fw *FileWatch
-	f *File
-}
-
-func (fr *FileReader) ReadLine() (path string, b []byte, err error) {
-	fr.rl.Lock()
-	defer fr.rl.Unlock()
-
-	fr.l.Lock()
-	defer fr.l.Unlock()
-	if fr.f == nil {
-		fr.rWait.Wait()
-	}
-	for {
-		path, b, err = fr.f.ReadLine()
-		if err != nil {
-			fr.wWait.Signal()
-			fr.rWait.Wait()
-			continue
-		}
-		break
-	}
-	path = fr.f.Path
-	// readline eat \n
-	fr.fw.AddFileOffset(fr.f, len(b)+1)
-	return
-}
-
-// ----------------------------------------------------------------------------
 
 type FileWatch struct {
 	pathList []string
@@ -294,9 +171,6 @@ func (fw *FileWatch) AddFile(p string, offset int64) {
 	}
 	f, err := NewFile(p, offset)
 	if err != nil { return }
-	defer func() {
-		
-	}()
 	fw.fileList[p] = f
 	if ! autoChooseOffset {
 		fw.sincedb[f.Ino()] = offset
@@ -340,48 +214,6 @@ func (fw *FileWatch) onDiscoverFile(p string) {
 	fw.AddFile(p, -1)
 }
 
-func fstat(fd uintptr) (stat *Stat, err error) {
-	var s_stat syscall.Stat_t
-	err = syscall.Fstat(int(fd), &s_stat)
-
-	ctime := time.Unix(s_stat.Birthtimespec.Sec, s_stat.Birthtimespec.Nsec)
-	stat = &Stat{s_stat, ctime}
-	return
-}
-
-func getStat(name string) (stat *Stat, err error) {
-	var s_stat syscall.Stat_t
-	err = syscall.Stat(name, &s_stat)
-	ctime := time.Unix(s_stat.Birthtimespec.Sec, s_stat.Birthtimespec.Nsec)
-	stat = &Stat{s_stat, ctime}
-	return
-}
-
 func (f *FileWatch) Subtitute() *FileReader {
 	return f.fr
 }
-
-func catchKillSignal(fw *FileWatch) {
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	signal.Notify(c, os.Kill)
-	go func(){
-		<- c
-		fw.StoreSincedb()
-		os.Exit(2)
-	}()
-}
-
-func main() {
-	watchPath := "/Users/cheney/Projects/logstash/*.log"
-	sincedbPath := "/Users/cheney/Projects/logstash/sincedb"
-	f := NewFileWatch(watchPath, sincedbPath)
-	catchKillSignal(f)
-	fr := f.Subtitute()
-	for {
-		path, b, err := fr.ReadLine()
-		if err != nil { return }
-		log.Println(path, string(b))
-	}
-}
-
