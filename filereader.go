@@ -8,6 +8,7 @@ type Pipe struct {
 	rl, wl, l sync.Mutex
 	wWait sync.Cond
 	rWait sync.Cond
+	rErr error
 }
 
 type FileReader struct {
@@ -16,7 +17,8 @@ type FileReader struct {
 	f *File
 }
 
-func (fr *FileReader) ReadLine() (path string, b []byte, err error) {
+func (fr *FileReader) ReadLine() (path string, data string) {
+	var err error
 	fr.rl.Lock()
 	defer fr.rl.Unlock()
 
@@ -26,8 +28,9 @@ func (fr *FileReader) ReadLine() (path string, b []byte, err error) {
 		fr.rWait.Wait()
 	}
 	for {
-		path, b, err = fr.f.ReadLine()
+		path, data, err = fr.f.ReadLine()
 		if err != nil {
+			fr.rErr = err
 			fr.wWait.Signal()
 			fr.rWait.Wait()
 			continue
@@ -36,6 +39,6 @@ func (fr *FileReader) ReadLine() (path string, b []byte, err error) {
 	}
 	path = fr.f.Path
 	// readline eat \n
-	fr.fw.AddFileOffset(fr.f, len(b)+1)
+	fr.fw.AddFileOffset(fr.f, len(data)+1)
 	return
 }

@@ -2,6 +2,8 @@ package filewatch
 
 import (
 	"os"
+	"io"
+	"bytes"
 	"time"
 	"bufio"
 )
@@ -33,10 +35,25 @@ func NewFile(p string, defOffset int64) (f *File, err error) {
 	return
 }
 
-func (f *File) ReadLine() (path string, b []byte, err error) {
-	b, _, err = f.buf.ReadLine()
-	if err != nil { return }
+func (f *File) ReadLine() (path, data string, err error) {
 	path = f.Path
+	offset := f.offset
+reread:
+	buf := make([]byte, 512)
+	n, err := f.ReadAt(buf, offset)
+	idx := bytes.IndexByte(buf, '\n')
+	if idx < 0 {
+		if n < len(buf) {
+			err = io.EOF
+			data = ""
+			return
+		}
+		data += string(buf)
+		offset += int64(len(buf))
+		goto reread
+	}
+	data += string(buf[:idx])
+	err = nil
 	return
 }
 
@@ -58,7 +75,6 @@ func (f *File) Read(buf []byte) (n int, err error) {
 }
 
 func (f *File) Seek(offset int64) {
-	// log.Println("seek", f.Path, "to", offset)
 	f.offset = offset
 }
 

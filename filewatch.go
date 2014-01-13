@@ -20,7 +20,7 @@ type FileWatch struct {
 	SincedbPath string
 }
 
-func NewFileWatch(path string, sincedbPath string) (fw *FileWatch) {
+func NewFileWatch(path []string, sincedbPath string) (fw *FileWatch) {
 	pipe := new(Pipe)
 	pipe.wWait.L = &pipe.l
 	pipe.rWait.L = &pipe.l
@@ -35,10 +35,12 @@ func NewFileWatch(path string, sincedbPath string) (fw *FileWatch) {
 		SincedbPath: sincedbPath,
 	}
 	fw.fr.fw = fw
-	fw.register(path)
+	for _, p := range path {
+		fw.register(p)
+	}
 	fw.restoreSincedb()
+	go fw.discover()
 	go fw.watch()
-	go fw.interval()
 	go func() {
 		fw.StoreSincedb()
 		time.Sleep(15 * time.Second)
@@ -57,8 +59,11 @@ func (f *FileWatch) register(path ...string) {
 	f.pathList = append(f.pathList, path...)
 }
 
-func (fw *FileWatch) interval() {
+func (fw *FileWatch) watch() {
 	for {
+		isNew := false
+		newStat := make(StatSlice, len(fw.fileList))
+		length := 0
 		for p, f := range fw.fileList {
 			stat, err := getStat(p)
 			if err != nil {
@@ -66,13 +71,21 @@ func (fw *FileWatch) interval() {
 				fw.RemoveFile(p)
 				continue
 			}
-			fw.guessWhatChange(p, f, stat)
+			newStat[length] = StatList{f, stat, p}
+			length++
 		}
-		time.Sleep(fw.Interval * time.Second)
+		newStat = newStat[:length]
+		newStat.Sort()
+		for _, stat := range newStat {
+			isNew = fw.guessWhatChange(stat.Path, stat.File, stat.Stat) || isNew
+		}
+		if ! isNew {
+			time.Sleep(fw.Interval * time.Second)
+		}
 	}
 }
 
-func (fw *FileWatch) watch() {
+func (fw *FileWatch) discover() {
 	for {
 		for _, p := range fw.getFileList() {
 			fw.onDiscoverFile(p)
@@ -115,7 +128,7 @@ func (fw *FileWatch) restoreSincedb() {
 	fw.sincedb = m
 }
 
-func (fw *FileWatch) notifyIncreate(f *File) {
+func (fw *FileWatch) notifyIncreate(f *File) (err error) {
 	fw.pipe.wl.Lock()
 	defer fw.pipe.wl.Unlock()
 
@@ -124,15 +137,21 @@ func (fw *FileWatch) notifyIncreate(f *File) {
 	fw.fr.f = f
 	fw.pipe.rWait.Signal()
 	fw.pipe.wWait.Wait()
+	if fw.fr.rErr != nil {
+		err = fw.fr.rErr
+		fw.fr.rErr = nil
+	}
+	return
 }
 
-func (fw *FileWatch) guessWhatChange(p string, f *File, pathStat *Stat) {
+func (fw *FileWatch) guessWhatChange(p string, f *File, pathStat *Stat) (isNew bool) {
 	// the same filename with diff inode, file moved
+	// log.Printf("guess %+v %+v %+v\n", p, f.Offset(), pathStat.Size)
 	if f.Ino() != pathStat.Ino {
 		fw.RemoveFile(p)
 		fw.AddFile(p, 0)
 		// log.Printf("%v, %+v, pathStat: %+v, old file move! reopen file\n", p, fw.fileList[p], pathStat)
-		return
+		return true
 	}
 	offset := f.Offset()
 	if offset == pathStat.Size {
@@ -143,15 +162,17 @@ func (fw *FileWatch) guessWhatChange(p string, f *File, pathStat *Stat) {
 		// log.Println("seek 0", offset,pathStat.Size)
 		f.UpdateStat(pathStat)
 		f.Seek(0)
-		return
+		return true
 	}
 
-	// log.Println("increase")
 	// increate
 	// log.Printf("%+v %+v", pathStat, f, f.CacheStat())
 	f.UpdateStat(pathStat)
-	fw.notifyIncreate(f)
-	return
+	err := fw.notifyIncreate(f)
+	if err != nil {
+		return false
+	}
+	return true
 }
 
 func (fw *FileWatch) RemoveFile(p string) {
@@ -197,21 +218,10 @@ func (fw *FileWatch) AddFile(p string, offset int64) {
 	fw.sincedb[f.Ino()] = foffset
 }
 
-func (fw *FileWatch) onDiscoverFile(p string) {
-	f, ok := fw.fileList[p]
-	if ok {
-		pathStat, err := getStat(p)
-		if err != nil {
-			// file not exists
-			fw.RemoveFile(p)
-			// log.Println("file delete", p)
-			return
-		}
-		fw.guessWhatChange(p, f, pathStat)
-		return
-	}
-	// log.Println("file found", p)
+func (fw *FileWatch) onDiscoverFile(p string) (isNew bool) {
+	if _, ok := fw.fileList[p]; ok { return }
 	fw.AddFile(p, -1)
+	return true
 }
 
 func (f *FileWatch) Subtitute() *FileReader {
